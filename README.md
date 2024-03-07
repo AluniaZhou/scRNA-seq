@@ -7,6 +7,6 @@ GSE140228 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE140228) is used
 
 ## Code
 
-See [notebook] for specific details.
+See [notebook](code) for specific details.
 
 Packages required can be installed in a R enviroment
