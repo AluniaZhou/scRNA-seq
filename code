@@ -1,0 +1,266 @@
+a <- read.table("GSE140228_read_counts_Smartseq2.csv.gz", sep = ',')
+a[1:4,1:4]
+rownames(a) <- a[,1]
+colnames(a) <- a[1,]
+a <- a[-1,-1]
+a[1:4,1:4]
+b <- read.table("GSE140228_cell_info_Smartseq2.tsv.gz", header = T)
+b[1:4,1:4]
+table(b$Tissue)
+sce.meta <- data.frame(Tissue=b$Tissue,row.names = b$Barcode)
+head(sce.meta)
+#This step is to load your data intro RStudio,
+#Make sure you have your file in your environment and set up the working dictionary correctly 
+
+
+library("Seurat")
+scRNA = CreateSeuratObject(counts=a,
+                           meta.data = sce.meta,
+                           min.cells = 3,
+                           min.features = 50)
+scRNA@assays$RNA@layers$counts [1:4,1:4]
+head(scRNA@meta.data)
+#Install the Seurat package at frist
+
+
+dim(scRNA)
+table(grepl("^MT-",rownames(scRNA)))
+scRNA[["percent.mt"]] <- PercentageFeatureSet(scRNA, pattern = "^MT-")
+head(scRNA@meta.data)
+summary(scRNA@meta.data)
+scRNA <- subset(scRNA, subset = percent.mt < 10)
+dim(scRNA)
+# This step is to remove the cells with high proportion of mitochondrial genes
+# Change the percent.mt according to your own data
+
+
+VlnPlot(scRNA, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1 <- FeatureScatter(scRNA, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(scRNA, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+scRNA <- subset(scRNA, subset = nFeature_RNA > 200 & nFeature_RNA < 7000)
+# Quality control, change the threshold according to your own data
+
+
+scRNA <- NormalizeData(scRNA)
+scRNA <- FindVariableFeatures(scRNA, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(scRNA), 10) 
+top10
+plot1 <- VariableFeaturePlot(scRNA) 
+LabelPoints(plot = plot1, points = top10, repel = TRUE, size=2.5) +
+  +     theme(legend.position = c(0.1,0.8)) +
+  +     labs(tag = "C")
+# To find the HVFs for downstream analysis
+
+scRNA <- ScaleData(scRNA, features = (rownames(scRNA)))
+scRNA <- RunPCA(scRNA, features = VariableFeatures(scRNA)) 
+ElbowPlot(scRNA)
+pc.num=1:20
+# To get PCs for downstream clustering
+
+scRNA <- FindNeighbors(scRNA, dims = pc.num) 
+scRNA <- FindClusters(scRNA, resolution = 0.5)
+scRNA = RunUMAP(scRNA, dims = pc.num)
+DimPlot(scRNA, reduction = "umap",label=T)
+# Clustering and dimension reduction
+# Resolution 0.4-1.2 is recommended for dataset with thousands of cells
+
+scRNA.markers <- FindAllMarkers(scRNA, only.pos = TRUE)
+scRNA.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1)
+FeaturePlot(scRNA, features = c("MS4A1", "GNLY", 
+                                "CD3E", "CD14", 
+                                "FCER1A", "FCGR3A", 
+                                "LYZ", "PPBP","CD8A"))
+#Find and check the cluster markers
+#Change the features here if your target cells are not fully immune cells
+
+
+library(SingleR)
+ref <- HumanPrimaryCellAtlasData()
+clusters <- scRNA@meta.data$seurat_clusters
+result <- SingleR(test = as.SingleCellExperiment(scRNA), ref = ref, labels = ref$label.main,
+                  method = "cluster", clusters = clusters, 
+                  assay.type.test = "logcounts", assay.type.ref = "logcounts")
+celltype = data.frame(ClusterID=rownames(result), celltype=result$labels, stringsAsFactors = F)
+scRNA@meta.data$celltype = "NA"
+for(i in 1:nrow(celltype)){
+  scRNA@meta.data[which(scRNA@meta.data$seurat_clusters == celltype$ClusterID[i]),'celltype'] <- celltype$celltype[i]}
+p1 <- DimPlot(scRNA, group.by="celltype", label=F , reduction='umap')
+p1
+#SingleR annotation, annotation here is cluster-based
+#Change the labels to label$fine to get more detailed annotation
+#Do not fully trust the SingleR annotation if your target cells belong to a rare subset
+
+
+NK <- subset(x = scRNA, subset = celltype == "NK_cell")
+NK <- NormalizeData(NK)
+NK <- FindVariableFeatures(NK, selection.method = "vst", nfeatures = 2000)
+NK <- ScaleData(NK, features = (rownames(NK)))
+NK <- RunPCA(NK, features = VariableFeatures(NK)) 
+NK <- FindNeighbors(NK, dims = pc.num) 
+NK <- FindClusters(NK, resolution = 0.5)
+NK = RunUMAP(NK, dims = pc.num)
+DimPlot(NK, reduction = "umap",label=T)
+NK.markers <- FindAllMarkers(NK, only.pos = TRUE)
+NK.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(NK, features = top10$gene) + NoLegend()
+#NK cells are selected and analyzed for their subclusters
+#Change NK cells to your own interested target cell
+#You can directly go to this step if all cells from original dataset are your interest cells 
+
+
+VlnPlot(NK, features = "TIGIT")
+DotPlot(NK, features = c("PRF1", "IFNG", "GZMB", "TNFSF10", "KLRK1", "RGS1"))
+DimPlot(NK, reduction = "umap", split.by = "Tissue")
+
+pt <- table(Idents(NK), NK$Tissue)
+pt <- as.data.frame(pt)
+pt$Var1<- as.character(pt$Var1)
+ggplot(pt, aes(x = Var2, y = Freq, fill = Var1)) +
+            theme_bw(base_size = 15) +
+            geom_col(position = "fill", width = 0.5) +
+            xlab("Sample") +
+            ylab("Proportion") +
+            theme(legend.title = element_blank())
+
+metadata_df <- as.data.frame(NK@meta.data)
+cluster_counts <- table(metadata_df$seurat_clusters, Idents(NK))
+cluster_counts_df <- as.data.frame(cluster_counts)
+View(cluster_counts_df)
+cluster_counts <- table(metadata_df$Tissue, Idents(NK))
+cluster_counts_df <- as.data.frame(cluster_counts)
+names(cluster_counts_df) <- c("Tissue", "Cluster", "Count")
+ggplot(cluster_counts_df, aes(x="", y=Count, fill=factor(Cluster))) + 
+  geom_bar(width = 1, stat = "identity") + 
+  facet_wrap(~Tissue) + 
+  coord_polar("y") + 
+  theme_void() + 
+  labs(fill="Cluster") + 
+  theme(legend.position="right")
+#Use ggplot2 to visualize your data
+#Could compare between different tissue, response/non-reposne patients...
+
+
+library(monocle)
+data <- as(as.matrix(NK@assays$RNA@layers$counts), 'sparseMatrix')
+fData <- data.frame(gene_short_name = row.names(NK@assays$RNA), row.names = row.names(NK@assays$RNA))
+fd <- new('AnnotatedDataFrame', data = fData)
+pd <- new('AnnotatedDataFrame', data = NK@meta.data)
+mycds <- newCellDataSet(data,phenoData = pd,featureData = fd,expressionFamily = negbinomial.size())
+mycds <- estimateSizeFactors(mycds)
+mycds <- estimateDispersions(mycds, cores=4, relative_expr = TRUE)
+mycds <- setOrderingFilter(mycds, NK.markers$gene)
+mycds <- reduceDimension(mycds, max_components = 2, method = 'DDRTree')
+mycds <- orderCells(mycds)
+p1 <- plot_cell_trajectory(mycds, color_by = "seurat_clusters")
+p1
+p2 <- plot_cell_trajectory(mycds, color_by = "State")
+p2
+p3 <- plot_cell_trajectory(mycds, color_by = "Pseudotime")+ scale_color_gradient2 (low="#33ff33", mid="#f6ff33", high="#ff5b33")
+p3
+#Trajectory analysis by monocle
+
+
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("AnnotationHub")
+top100 <- NK.markers %>% group_by(cluster) %>% top_n(n = 100, wt = avg_log2FC)
+top100pval <- subset(top100, rowSums(top100[5] < 0.05) > 0)
+df <- top100pval[,7:6]
+#This the the column contain cluster id and marker gene name, change the column number if needed
+dfsample <- split(df$gene,df$cluster)
+dfsample <- lapply(dfsample, function(x) {
+  tryCatch({
+    bitr(x, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+  }, error=function(e) NULL)
+})
+#Transfer gene name to ENTREZID id to align the requirement of enrichment analysis
+genelist <- lapply(dfsample, function(x) {
+  if(!is.null(x)) x$ENTREZID else NULL
+})
+genelist <- Filter(length, genelist)
+#Prepare ENTREZD list and remove NULL entries
+GOclusterplot <- compareCluster(geneCluster = genelist, fun = "enrichGO", OrgDb = "org.Hs.eg.db")
+dotplot(GOclusterplot)
+KEGGclusterplot <- compareCluster(geneCluster = genelist, fun = "enrichKEGG", OrgDb = "org.Hs.eg.db")
+dotplot(KEGGclusterplot)
+#Perform GO and KEGG enrichment analysis based each cluster's marker gene
+
+
+library(GSVA)
+Activation <- c("CD244", "CD226","KLRC2", "KLRK1", "NCR3", "NCR1", "NCR2", "CD69", "IL2RA", "KIR2DS1", "KIR2DS2", "KIR2DS4", "FCGR3A", "LAMP1","KIT")
+Inhibition <- c("KIR2DL2", "KIR2DL3", "KLRD1", "KLRC1", "KIR3DL1", "SIGLEC7","LAG3", "HAVCR2", "TIGIT", "PDCD1", "LILRB1")
+Function <-c("TNFSF10", "PRF1", "SYK", "ZAP70", "GZMB", "GZMA", "FAS", "CD247", "GZMH","GZMK")
+gene_sets <- list(Activation,Inhibition,Function)
+ssgseavalue <- gsva(expr = NK@assays$RNA$data,gset.idx.list = gene_sets, method = "ssgsea")
+matrix1 <- as.matrix(NK@meta.data)
+matrix1 <- matrix1[,7]
+#This is the column of cluster id, change the number if needed
+matrix2 <- as.matrix(matrix1)
+matrix2 <- t(matrix2)
+ssgseavalue <- rbind(ssgseavalue,matrix2)
+rownames(ssgseavalue) <- c("NK_activation", "NK_inhibition", "NK_function", "Cluster")
+ssgsea1 <- as.data.frame(ssgseavalue)
+ssgsea2 <- t(ssgsea1)
+ssgsea2 <- as.data.frame(ssgsea2)
+ssgsea2$NK_activation <- as.numeric(ssgsea2$NK_activation)
+ssgsea2$NK_inhibition <- as.numeric(ssgsea2$NK_inhibition)
+ssgsea2$NK_function <- as.numeric(ssgsea2$NK_function)
+ssgsea2$Cluster <- as.factor(ssgsea2$Cluster)
+pp1 <- ggplot(ssgsea2, aes(x = Cluster, y = NK_activation)) + geom_violin(aes(fill = Cluster), trim = FALSE) 
+  + geom_boxplot(width = 0.2)+theme(legend.position = "none")
+pp2 <- ggplot(ssgsea2, aes(x = Cluster, y = NK_inhibition)) + geom_violin(aes(fill = Cluster), trim = FALSE) 
+  + geom_boxplot(width = 0.2)+theme(legend.position = "none")
+pp3 <- ggplot(ssgsea2, aes(x = Cluster, y = NK_function)) + geom_violin(aes(fill = Cluster), trim = FALSE) 
+  + geom_boxplot(width = 0.2)+theme(legend.position = "none")
+#GSVA enrichment analysis. The gene sets are built up by myself for NK cell, change to your own if needed
+library(ggpval)
+add_pval(pp1,pairs = list(c(1,2), c(2,3),c(1,4)),test = "wilcox.test")
+#You could add the p value between two clusters
+
+
+
+#Below is the for datasets integration and batch alignment, which doesn't follow the previous analyses
+load("NK1.Rdata")
+load("NK2.Rdata")
+load("NK3.Rdata")
+load("NK4.Rdata")
+#Here we have 4 datasets from 4 different studies
+NK <- merge(x=NK1, y=c(NK2,NK3,NK4))
+NK <- NormalizeData(NK)
+NK <- FindVariableFeatures(NK)
+NK <- ScaleData(NK)
+NK <- RunPCA(NK)
+NK <- FindNeighbors(NK, dims = 1:30, reduction = "pca")
+NK <- FindClusters(NK, resolution = 2, cluster.name = "unintegrated_clusters")
+NK <- RunUMAP(NK, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+DimPlot(NK, reduction = "umap.unintegrated", group.by = c("Batch"))
+#This is to check the batch effect
+#Batch alignment could be skipped if no significant batch effect is observed
+NK <- IntegrateLayers(
+  object = NK, method = HarmonyIntegration,
+  orig.reduction = "pca", new.reduction = "harmony",
+  verbose = FALSE)
+#Harmony is a method to do the batch alignment
+#You can find more alignment methods inside the Seurat package
+#Do check the Seurat website, the code here might be different if you use a new/old version of Seurat
+NK <- FindNeighbors(NK, reduction = "harmony", dims = 1:30)
+NK <- FindClusters(NK, resolution = 0.5, cluster.name = "harmony_clusters")
+NK <- RunUMAP(NK, reduction = "harmony", dims = 1:30, reduction.name = "umap.harmony")
+p1 <- DimPlot(NK,reduction = "umap.harmony", group.by = c("Batch", "harmony_clusters"),combine = FALSE)
+p1
+DimPlot(NK, reduction = "umap.harmony", split.by = "Tissue")
+#Check the batch alignment result
+NK <- JoinLayers(NK)
+#Finish the integration of datasets
+
+
+
+
+
